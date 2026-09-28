@@ -1,4 +1,5 @@
-from fastapi import Body, FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query
+from pydantic import BaseModel
 
 app = FastAPI(title="Mini Blog")
 
@@ -7,6 +8,20 @@ BLOG_POST = [
     {"id": 2, "title": "Second Post", "content": "This is the second post."},
     {"id": 3, "title": "Django vs FastAPI", "content": "FastAPI es mas rapido que Django."}
 ]
+
+# Modelado de datos con Pydanic
+class PostBase(BaseModel):
+    title: str
+    content: str
+
+class PostCreate(PostBase):
+    ...
+
+class PostUpdate(BaseModel):
+    title: str
+    content: str
+
+
 
 # METODOS GET
 @app.get("/")
@@ -35,25 +50,21 @@ def get_post(post_id: int, include_contet: bool=Query(default=True, description=
 
 # METODOS POST
 @app.post("/post")
-def create_post(post: dict=Body(...)):  # noqa: B008
-    if "title" not in post or "content" not in post:
-        return {"error": "Title or content is required"}
-
-    if not str(post["title"]).strip():
-        return {"error": "Title can't be empty"}
-
+def create_post(post: PostCreate):  
     new_id = (BLOG_POST[-1]["id"] + 1) if BLOG_POST else 1
-    new_post = {"id": new_id, "tile": post["title"], "content": post["content"]}
+    new_post = {"id": new_id, "tile": post.title, "content": post.content}
     BLOG_POST.append(new_post)
     return {"message": "post created", "data": new_post}
 
 # METODO PUT
 @app.put("/post/{post_id}")
-def update_post(post_id: int, update_data: dict=Body(...)):  # noqa: B008
+def update_post(post_id: int, update_data: PostUpdate):  
     for post in BLOG_POST:
-        if post["id"] == post_id and "title" and "content" in update_data:
-            post["title"] = update_data["title"]
-            post["content"] = update_data["content"]
+        if post["id"] == post_id: 
+            playload = update_data.model_dump(exclude_unset=True)
+            if "title" and "content" in playload:
+                post["title"] = playload["title"]
+                post["content"] = playload["content"]
             return {"message": "Update Post", "data": post}
 
     raise HTTPException(status_code=404, detail="Post not found")
