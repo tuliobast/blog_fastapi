@@ -8,5 +8,22 @@ dependencies = [
     "fastapi[standard]>=0.141.1",
 ]
 
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.9",
+]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "I",
+    "UP",
+    "B"    
+]
 # [tool.fastapi]
 # entrypoint = "main:app"
