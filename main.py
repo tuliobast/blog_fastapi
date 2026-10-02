@@ -1,12 +1,22 @@
 import os
+from datetime import datetime
 from math import ceil
 from typing import Annotated, Literal
 
-from fastapi import FastAPI, HTTPException, Path, Query
-from pydantic import BaseModel, EmailStr, Field, field_validator
-from sqlalchemy import create_engine
-from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
-
+from fastapi import Depends, FastAPI, HTTPException, Path, Query, status
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from sqlalchemy import (
+    DateTime,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    create_engine,
+    func,
+    select,
+)
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./blog.db")
 print("Connect to: ", DATABASE_URL)
@@ -17,10 +27,26 @@ if DATABASE_URL.startswith("sqlite"):
 
 engine = create_engine(DATABASE_URL, echo=True, future=True, **engine_kwargs)
 SessionLocal = sessionmaker(
-    bind=engine, autoflush=False, autocommit=False, class_=Session)
+    bind=engine, autoflush=False, autocommit=False, class_=Session
+)
 
-class Base(DeclarativeBase):
-    ...
+
+class Base(DeclarativeBase): ...
+
+
+class PostORM(Base):
+    __tablename__ = "post"
+    __table_args__ = (UniqueConstraint("title", name="unique_post_title"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    title: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    create_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.now
+    )  # ojo aca
+
+
+Base.metadata.create_all(bind=engine)  # solo para dev en prod va a ser con migraciones
 
 
 def get_db():
@@ -157,10 +183,14 @@ class PostUpdate(BaseModel):
 class PostPublic(PostBase):
     id: int
 
+    model_config = ConfigDict(from_attributes=True)
+
 
 class PostSummary(BaseModel):
     id: int
     title: str
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class PaginatedPost(BaseModel):
@@ -208,28 +238,35 @@ def list_posts(
     page: Annotated[int, Query(ge=1, description="Page Number (>=1)")] = 1,
     order_by: Literal["id", "title"] = Query("id", description="Order field"),
     direction: Literal["asc", "desc"] = Query("asc", description="Order direction"),
+    db: Session = Depends(get_db),
 ):
-    results = BLOG_POST
+    results = select(PostORM)
 
     # query= query or text # solo para probar deprecated parameter
     if query:
-        results = [post for post in results if query.lower() in post["title"].lower()]
+        results = results.where(PostORM.title.ilike(f"%{query}%"))
 
-    total = len(results)
+    total = db.scalar(select(func.count()).select_from(results.subquery())) or 0
     total_pages = ceil(total / per_page) if total > 0 else 0
-    if total_pages == 0:
-        current_page = 1
-    else:
-        current_page = min(page, total_pages)
+    current_page = 1 if total_pages == 0 else min(page, total_pages)
 
-    results = sorted(
-        results, key=lambda post: post[order_by], reverse=(direction == "desc")
+    if order_by == "id":
+        order_col = PostORM.id
+    else:
+        order_col = func.lower(PostORM.title)
+
+    results = results.order_by(
+        order_col.asc() if direction == "asc" else order_col.desc()
     )
+
+    # results = sorted(
+    #     results, key=lambda post: post[order_by], reverse=(direction == "desc")
+    # )
     if total_pages == 0:
-        items = []
+        items: list[PostORM] = []
     else:
         start = (current_page - 1) * per_page
-        items = results[start : start + per_page]
+        items = db.execute(results.limit(per_page).offset(start)).scalars().all()
 
     has_prev = current_page > 1
     has_next = current_page < total_pages if total_pages > 0 else False
@@ -248,7 +285,7 @@ def list_posts(
     )
 
 
-@app.get("/post/by-tags", response_model=list[PostPublic])
+@app.get("/posts/by-tags", response_model=list[PostPublic])
 def filter_by_tags(
     tags: Annotated[
         list[str],
@@ -270,7 +307,7 @@ def filter_by_tags(
 
 ## path params
 @app.get(
-    "/post/{post_id}",
+    "/posts/{post_id}",
     response_model=PostPublic | PostSummary,
     response_model_exclude_unset=True,
     response_description="Post found",
@@ -280,69 +317,93 @@ def get_post(
         ..., ge=1, title="Post Id", description="Should be greater than 0"
     ),
     include_contet: bool = Query(default=True, description="include or not content"),
+    db: Session = Depends(get_db),
 ):
-    for post in BLOG_POST:
-        if post["id"] == post_id:
-            if include_contet:
-                return post
-            return {"id": post["id"], "title": post["title"]}
 
-    return HTTPException(status_code=404, details="Post not faound")
+    post_find = select(PostORM).where(PostORM.id == post_id)
+
+    post = db.execute(post_find).scalar_one_or_none()
+
+    # post= db.get(PostORM, post_id)
+
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+
+    if include_contet:
+        return PostPublic.model_validate(post, from_attributes=True)
+
+    return PostPublic.model_validate(post, from_attributes=True)
 
 
 # METODOS POST
 @app.post(
-    "/post",
+    "/posts",
     response_model=PostPublic,
     response_description="Post created (OK)",
+    status_code=status.HTTP_201_CREATED,
     response_model_exclude_defaults=True,
 )
-def create_post(post: PostCreate):
-    new_id = (BLOG_POST[-1]["id"] + 1) if BLOG_POST else 1
-    new_post = {
-        "id": new_id,
-        "title": post.title,
-        "content": post.content,
-        "tags": [tag.model_dump() for tag in post.tags],
-        "author": post.author.model_dump() if post.author else None,
-    }
-
-    BLOG_POST.append(new_post)
-    return new_post
+def create_post(
+    post: PostCreate,
+    db: Session = Depends(get_db),
+):
+    new_post = PostORM(title=post.title, content=post.content)
+    try:
+        db.add(new_post)
+        db.commit()
+        db.refresh(new_post)
+        return new_post
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="The title already exist")  # noqa: B904
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Error to created the post")  # noqa: B904
+    # new_id = (BLOG_POST[-1]["id"] + 1) if BLOG_POST else 1
+    # new_post = {
+    #     "id": new_id,
+    #     "title": post.title,
+    #     "content": post.content,
+    #     "tags": [tag.model_dump() for tag in post.tags],
+    #     "author": post.author.model_dump() if post.author else None,
+    # }
+    # BLOG_POST.append(new_post)
+    # return new_post
 
 
 # METODO PUT
 @app.put(
-    "/post/{post_id}",
+    "/posts/{post_id}",
     response_model=PostPublic,
     response_description="Update post (OK)",
     response_model_exclude_unset=True,
     response_model_exclude_defaults=True,
     response_model_exclude_none=True,
 )
-def update_post(post_id: int, update_data: PostUpdate):
-    for post in BLOG_POST:
-        if post["id"] == post_id:
-            playload = update_data.model_dump(exclude_unset=True)
-            if "title" in playload:
-                post["title"] = playload["title"]
-            if "content" in playload:
-                post["content"] = playload["content"]
-            if "tags" in playload:
-                post["tags"] = playload["tags"]
-            if "author" in playload:
-                post["author"] = playload["author"]
-            return post
+def update_post(
+    post_id: int,
+    update_data: PostUpdate,
+    db: Session = Depends(get_db),
+):
+    post_edit = db.get(PostORM, post_id)
+    if not post_edit:
+        raise HTTPException(status_code=404, detail="Post not found")
 
-    raise HTTPException(status_code=404, detail="Post not found")
+    updates = update_data.model_dump(exclude_unset=True)
+    for key, value in updates.items():
+        setattr(post_edit, key, value)
+    db.add(post_edit)
+    db.commit()
+    db.refresh(post_edit)
+    return post_edit
 
 
 # METODO DELETE
-@app.delete("/post/{post_id}", status_code=204, response_description="Post deleted")
-def delete_post(post_id: int):
-    for index, post in enumerate(BLOG_POST):
-        if post["id"] == post_id:
-            BLOG_POST.pop(index)
-            return
-
-    raise HTTPException(status_code=404, detail="Post not found ")
+@app.delete("/posts/{post_id}", status_code=204, response_description="Post deleted")
+def delete_post(post_id: int, db: Session = Depends(get_db)):
+    post_delete = db.get(PostORM, post_id)
+    if not post_delete:
+        raise HTTPException(status_code=404, delete="Post not found")
+    db.delete(post_delete)
+    db.commit()
+    return
