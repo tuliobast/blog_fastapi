@@ -1,25 +1,36 @@
 import os
 from datetime import datetime
 from math import ceil
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Path, Query, status
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 from sqlalchemy import (
+    Column,
     DateTime,
     Integer,
     String,
+    Table,
     Text,
     UniqueConstraint,
+    ForeignKey,
     create_engine,
     func,
     select,
+    
 )
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
-from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+from sqlalchemy.orm import (
+    DeclarativeBase, 
+    Mapped, 
+    Session, 
+    mapped_column, 
+    relationship, 
+    sessionmaker,
+)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./blog.db")
-print("Connect to: ", DATABASE_URL)
+print("Connect to: ", DATABASE_URL) 
 
 engine_kwargs = {}
 if DATABASE_URL.startswith("sqlite"):
@@ -34,17 +45,55 @@ SessionLocal = sessionmaker(
 class Base(DeclarativeBase): ...
 
 
+post_tags = Table(
+    "post_tags",
+    Base.metadata,
+    Column("post_id", ForeignKey("posts.id", ondelete="CASCADE", primary_key=True)),
+    Column("tags_id", ForeignKey("tags.id", ondelete="CASCADE", primary_key=True))
+)
+
+class AuthorORM(Base):
+    __tablename__ = "authors"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    email: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+
+    posts: Mapped[list["PostORM"]] = relationship(back_populates="author")
+
+
+class TagORM(Base):
+    __tablename__ = "tags"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(30),unique=True, index=True)
+
+    posts: Mapped[list["PostORM"]] = relationship(
+        secondary="post_tags",
+        back_populates="tags",
+        lazy="selectin"                                                                                             
+    )
+
+
 class PostORM(Base):
-    __tablename__ = "post"
+    __tablename__ = "posts"
     __table_args__ = (UniqueConstraint("title", name="unique_post_title"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     title: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    create_at: Mapped[datetime] = mapped_column(
+    created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.now
     )  # ojo aca
 
+    author_id: Mapped[int | None] = mapped_column(ForeignKey("authors.id"))
+    author: Mapped[Optional["AuthorORM"]] = relationship(back_populates="posts")
+    tags: Mapped[list["TagORM"]] = relationship(
+        secondary=post_tags,
+        back_populates='posts',
+        lazy="selectin",
+        passive_deletes=True
+        )
 
 Base.metadata.create_all(bind=engine)  # solo para dev en prod va a ser con migraciones
 
@@ -58,84 +107,19 @@ def get_db():
 
 
 app = FastAPI(title="Mini Blog")
-
-BLOG_POST = [
-    {"id": 1, "title": "Hola desde FastAPI", "content": "Mi primer post con FastAPI"},
-    {
-        "id": 2,
-        "title": "Mi segundo Post con FastAPI",
-        "content": "Mi segundo post con FastAPI blablabla",
-    },
-    {
-        "id": 3,
-        "title": "Django vs FastAPI",
-        "content": "FastAPI es más rápido por x razones",
-        "tags": [{"name": "Python"}, {"name": "fastapi"}, {"name": "Django"}],
-    },
-    {"id": 4, "title": "Hola desde FastAPI", "content": "Mi primer post con FastAPI"},
-    {
-        "id": 5,
-        "title": "Mi segundo Post con FastAPI",
-        "content": "Mi segundo post con FastAPI blablabla",
-        "tags": [{"name": "Python"}, {"name": "string"}, {"name": "Go"}],
-    },
-    {
-        "id": 6,
-        "title": "Django vs FastAPI",
-        "content": "FastAPI es más rápido por x razones",
-    },
-    {
-        "id": 7,
-        "title": "Hola desde FastAPI",
-        "content": "Mi primer post con FastAPI",
-        "tags": [{"name": "Python"}, {"name": "backend"}, {"name": "js"}],
-    },
-    {
-        "id": 8,
-        "title": "Mi segundo Post con FastAPI",
-        "content": "Mi segundo post con FastAPI blablabla",
-    },
-    {
-        "id": 9,
-        "title": "Django vs FastAPI",
-        "content": "FastAPI es más rápido por x razones",
-    },
-    {"id": 10, "title": "Hola desde FastAPI", "content": "Mi primer post con FastAPI"},
-    {
-        "id": 11,
-        "title": "Mi segundo Post con FastAPI",
-        "content": "Mi segundo post con FastAPI blablabla",
-    },
-    {
-        "id": 12,
-        "title": "Django vs FastAPI",
-        "content": "FastAPI es más rápido por x razones",
-        "tags": [{"name": "Python"}, {"name": "fastapi"}, {"name": "Django"}],
-    },
-    {"id": 13, "title": "Hola desde FastAPI", "content": "Mi primer post con FastAPI"},
-    {
-        "id": 14,
-        "title": "Mi segundo Post con FastAPI",
-        "content": "Mi segundo post con FastAPI blablabla",
-    },
-    {
-        "id": 15,
-        "title": "Django vs FastAPI",
-        "content": "FastAPI es más rápido por x razones",
-        "tags": [{"name": "Python"}, {"name": "fastapi"}, {"name": "Django"}],
-    },
-]
-
+ 
 
 # Metodos anidados
 class Tag(BaseModel):
     name: str = Field(..., min_length=2, max_length=30, description="names tags")
 
+    model_config = ConfigDict(from_attributes=True)
 
 class Author(BaseModel):
     name: str = None
     email: EmailStr = None
 
+    model_config = ConfigDict(from_attributes=True)
 
 # Modelado de datos con Pydanic
 class PostBase(BaseModel):
@@ -144,6 +128,7 @@ class PostBase(BaseModel):
     tags: list[Tag] = Field(default_factory=list)
     author: Author = None
 
+    model_config = ConfigDict(from_attributes=True)
 
 class PostCreate(BaseModel):
     title: str = Field(
@@ -238,7 +223,7 @@ def list_posts(
     page: Annotated[int, Query(ge=1, description="Page Number (>=1)")] = 1,
     order_by: Literal["id", "title"] = Query("id", description="Order field"),
     direction: Literal["asc", "desc"] = Query("asc", description="Order direction"),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db),  # noqa: B008
 ):
     results = select(PostORM)
 
@@ -317,7 +302,7 @@ def get_post(
         ..., ge=1, title="Post Id", description="Should be greater than 0"
     ),
     include_contet: bool = Query(default=True, description="include or not content"),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db),  # noqa: B008
 ):
 
     post_find = select(PostORM).where(PostORM.id == post_id)
@@ -345,9 +330,26 @@ def get_post(
 )
 def create_post(
     post: PostCreate,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db),  # noqa: B008
 ):
-    new_post = PostORM(title=post.title, content=post.content)
+    author_obj = None
+    if post.author:
+        author_obj = db.execute(
+            select(AuthorORM).where(AuthorORM.email==post.author.email)).scalar_one_or_none()
+
+        if not author_obj:
+            author_obj = AuthorORM(name=post.author.name,
+                                   email=post.author.email)
+            db.add(author_obj)
+            db.flush()
+    new_post = PostORM(title=post.title, content=post.content, author=author_obj)
+    for tag in post.tags:
+        tag_obj = db.execute(
+            select(TagORM).where(TagORM.name.ilike(tag.name))).scalar_one_or_none()
+        if not tag_obj:
+            tag_obj = TagORM(name=tag.name)
+            db.add(tag_obj)
+            db.flush()
     try:
         db.add(new_post)
         db.commit()
@@ -383,7 +385,7 @@ def create_post(
 def update_post(
     post_id: int,
     update_data: PostUpdate,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db),  # noqa: B008
 ):
     post_edit = db.get(PostORM, post_id)
     if not post_edit:
@@ -400,7 +402,7 @@ def update_post(
 
 # METODO DELETE
 @app.delete("/posts/{post_id}", status_code=204, response_description="Post deleted")
-def delete_post(post_id: int, db: Session = Depends(get_db)):
+def delete_post(post_id: int, db: Session = Depends(get_db)):  # noqa: B008
     post_delete = db.get(PostORM, post_id)
     if not post_delete:
         raise HTTPException(status_code=404, delete="Post not found")
