@@ -3,6 +3,7 @@ from datetime import datetime
 from math import ceil
 from typing import Annotated, Literal, Optional
 
+from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Path, Query, status
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 from sqlalchemy import (
@@ -23,14 +24,19 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import (
     DeclarativeBase, 
     Mapped, 
-    Session, 
+    Session,
+    joinedload, 
     mapped_column, 
-    relationship, 
+    relationship,
+    selectinload, 
     sessionmaker,
 )
 
+
+load_dotenv()
+
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./blog.db")
-print("Connect to: ", DATABASE_URL) 
+# print("Connect to: ", DATABASE_URL) 
 
 engine_kwargs = {}
 if DATABASE_URL.startswith("sqlite"):
@@ -48,8 +54,8 @@ class Base(DeclarativeBase): ...
 post_tags = Table(
     "post_tags",
     Base.metadata,
-    Column("post_id", ForeignKey("posts.id", ondelete="CASCADE", primary_key=True)),
-    Column("tags_id", ForeignKey("tags.id", ondelete="CASCADE", primary_key=True))
+    Column("post_id", ForeignKey("posts.id", ondelete="CASCADE"), primary_key=True),
+    Column("tags_id", ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True),
 )
 
 class AuthorORM(Base):
@@ -280,14 +286,22 @@ def filter_by_tags(
             description="One or more tags. Example: ?tags=python&tags=fastapi",
         ),
     ],
-):
-    tags_lower = [tag.lower() for tag in tags]
+    db: Session =  Depends(get_db),  # noqa: B008
+):  
+    normalized_tag_names = [tag.strip().lower() for tag in tags if tag.strip()]
+    if not normalized_tag_names:
+        return []
+    
+    post_list = (
+        select(PostORM).options(
+            selectinload(PostORM.tags),
+            joinedload(PostORM.author)
+        ).where(PostORM.tags.any(func.lower(TagORM.name).in_(normalized_tag_names)))
+        .order_by(PostORM.id.asc())   
+    )
+    post = db.execute(post_list).scalars().all()
 
-    return [
-        post
-        for post in BLOG_POST
-        if any(tag["name"].lower() in tags_lower for tag in post.get("tags", []))
-    ]
+    return post
 
 
 ## path params
@@ -350,6 +364,7 @@ def create_post(
             tag_obj = TagORM(name=tag.name)
             db.add(tag_obj)
             db.flush()
+        new_post.tags.append(tag_obj)
     try:
         db.add(new_post)
         db.commit()
